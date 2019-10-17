@@ -92,85 +92,50 @@ class S3FilesStore(object):
     }
 
     def __init__(self, uri):
-        self.is_botocore = is_botocore()
-        if self.is_botocore:
-            import botocore.session
-            session = botocore.session.get_session()
-            self.s3_client = session.create_client(
-                's3',
-                aws_access_key_id=self.AWS_ACCESS_KEY_ID,
-                aws_secret_access_key=self.AWS_SECRET_ACCESS_KEY,
-                endpoint_url=self.AWS_ENDPOINT_URL,
-                region_name=self.AWS_REGION_NAME,
-                use_ssl=self.AWS_USE_SSL,
-                verify=self.AWS_VERIFY
-            )
-        else:
-            from boto.s3.connection import S3Connection
-            self.S3Connection = S3Connection
+        import oos
+        self.s3_client = oos.client(
+            's3',
+            access_key_id = self.AWS_ACCESS_KEY_ID,
+            secret_access_key = self.AWS_SECRET_ACCESS_KEY,
+            endpoint_url = self.AWS_ENDPOINT_URL,
+            region_name = self.AWS_REGION_NAME,
+            use_ssl = self.AWS_USE_SSL,
+            verify = self.AWS_VERIFY
+        )
         assert uri.startswith('s3://')
         self.bucket, self.prefix = uri[5:].split('/', 1)
-
+        
     def stat_file(self, path, info):
         def _onsuccess(boto_key):
-            if self.is_botocore:
-                checksum = boto_key['ETag'].strip('"')
-                last_modified = boto_key['LastModified']
-                modified_stamp = time.mktime(last_modified.timetuple())
-            else:
-                checksum = boto_key.etag.strip('"')
-                last_modified = boto_key.last_modified
-                modified_tuple = parsedate_tz(last_modified)
-                modified_stamp = int(mktime_tz(modified_tuple))
+            checksum = boto_key['ETag'].strip('"')
+            last_modified = boto_key['LastModified']
+            modified_stamp = time.mktime(last_modified.timetuple())
             return {'checksum': checksum, 'last_modified': modified_stamp}
 
         return self._get_boto_key(path).addCallback(_onsuccess)
 
-    def _get_boto_bucket(self):
-        # disable ssl (is_secure=False) because of this python bug:
-        # https://bugs.python.org/issue5103
-        c = self.S3Connection(self.AWS_ACCESS_KEY_ID, self.AWS_SECRET_ACCESS_KEY, is_secure=False)
-        return c.get_bucket(self.bucket, validate=False)
-
     def _get_boto_key(self, path):
         key_name = '%s%s' % (self.prefix, path)
-        if self.is_botocore:
-            return threads.deferToThread(
-                self.s3_client.head_object,
-                Bucket=self.bucket,
-                Key=key_name)
-        else:
-            b = self._get_boto_bucket()
-            return threads.deferToThread(b.get_key, key_name)
+        return threads.deferToThread(
+            self.s3_client.head_object,
+            Bucket=self.bucket,
+            Key=key_name)
 
     def persist_file(self, path, buf, info, meta=None, headers=None):
         """Upload file to S3 storage"""
         key_name = '%s%s' % (self.prefix, path)
         buf.seek(0)
-        if self.is_botocore:
-            extra = self._headers_to_botocore_kwargs(self.HEADERS)
-            if headers:
-                extra.update(self._headers_to_botocore_kwargs(headers))
-            return threads.deferToThread(
-                self.s3_client.put_object,
-                Bucket=self.bucket,
-                Key=key_name,
-                Body=buf,
-                Metadata={k: str(v) for k, v in six.iteritems(meta or {})},
-                ACL=self.POLICY,
-                **extra)
-        else:
-            b = self._get_boto_bucket()
-            k = b.new_key(key_name)
-            if meta:
-                for metakey, metavalue in six.iteritems(meta):
-                    k.set_metadata(metakey, str(metavalue))
-            h = self.HEADERS.copy()
-            if headers:
-                h.update(headers)
-            return threads.deferToThread(
-                k.set_contents_from_string, buf.getvalue(),
-                headers=h, policy=self.POLICY)
+        extra = self._headers_to_botocore_kwargs(self.HEADERS)
+        if headers:
+            extra.update(self._headers_to_botocore_kwargs(headers))
+        return threads.deferToThread(
+            self.s3_client.put_object,
+            Bucket=self.bucket,
+            Key=key_name,
+            Body=buf,
+            Metadata={k: str(v) for k, v in six.iteritems(meta or {})},
+            ACL=self.POLICY,
+            **extra)
 
     def _headers_to_botocore_kwargs(self, headers):
         """ Convert headers to botocore keyword agruments.
