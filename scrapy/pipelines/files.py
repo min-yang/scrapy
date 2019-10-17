@@ -5,7 +5,6 @@ See documentation in topics/media-pipeline.rst
 """
 import functools
 import hashlib
-import mimetypes
 import os
 import os.path
 import time
@@ -14,7 +13,6 @@ from email.utils import parsedate_tz, mktime_tz
 from six.moves.urllib.parse import urlparse
 from collections import defaultdict
 import six
-
 
 try:
     from cStringIO import StringIO as BytesIO
@@ -94,85 +92,50 @@ class S3FilesStore(object):
     }
 
     def __init__(self, uri):
-        self.is_botocore = is_botocore()
-        if self.is_botocore:
-            import botocore.session
-            session = botocore.session.get_session()
-            self.s3_client = session.create_client(
-                's3',
-                aws_access_key_id=self.AWS_ACCESS_KEY_ID,
-                aws_secret_access_key=self.AWS_SECRET_ACCESS_KEY,
-                endpoint_url=self.AWS_ENDPOINT_URL,
-                region_name=self.AWS_REGION_NAME,
-                use_ssl=self.AWS_USE_SSL,
-                verify=self.AWS_VERIFY
-            )
-        else:
-            from boto.s3.connection import S3Connection
-            self.S3Connection = S3Connection
+        import oos
+        self.s3_client = oos.client(
+            's3',
+            access_key_id = self.AWS_ACCESS_KEY_ID,
+            secret_access_key = self.AWS_SECRET_ACCESS_KEY,
+            endpoint_url = self.AWS_ENDPOINT_URL,
+            region_name = self.AWS_REGION_NAME,
+            use_ssl = self.AWS_USE_SSL,
+            verify = self.AWS_VERIFY
+        )
         assert uri.startswith('s3://')
         self.bucket, self.prefix = uri[5:].split('/', 1)
-
+        
     def stat_file(self, path, info):
         def _onsuccess(boto_key):
-            if self.is_botocore:
-                checksum = boto_key['ETag'].strip('"')
-                last_modified = boto_key['LastModified']
-                modified_stamp = time.mktime(last_modified.timetuple())
-            else:
-                checksum = boto_key.etag.strip('"')
-                last_modified = boto_key.last_modified
-                modified_tuple = parsedate_tz(last_modified)
-                modified_stamp = int(mktime_tz(modified_tuple))
+            checksum = boto_key['ETag'].strip('"')
+            last_modified = boto_key['LastModified']
+            modified_stamp = time.mktime(last_modified.timetuple())
             return {'checksum': checksum, 'last_modified': modified_stamp}
 
         return self._get_boto_key(path).addCallback(_onsuccess)
 
-    def _get_boto_bucket(self):
-        # disable ssl (is_secure=False) because of this python bug:
-        # https://bugs.python.org/issue5103
-        c = self.S3Connection(self.AWS_ACCESS_KEY_ID, self.AWS_SECRET_ACCESS_KEY, is_secure=False)
-        return c.get_bucket(self.bucket, validate=False)
-
     def _get_boto_key(self, path):
         key_name = '%s%s' % (self.prefix, path)
-        if self.is_botocore:
-            return threads.deferToThread(
-                self.s3_client.head_object,
-                Bucket=self.bucket,
-                Key=key_name)
-        else:
-            b = self._get_boto_bucket()
-            return threads.deferToThread(b.get_key, key_name)
+        return threads.deferToThread(
+            self.s3_client.head_object,
+            Bucket=self.bucket,
+            Key=key_name)
 
     def persist_file(self, path, buf, info, meta=None, headers=None):
         """Upload file to S3 storage"""
         key_name = '%s%s' % (self.prefix, path)
         buf.seek(0)
-        if self.is_botocore:
-            extra = self._headers_to_botocore_kwargs(self.HEADERS)
-            if headers:
-                extra.update(self._headers_to_botocore_kwargs(headers))
-            return threads.deferToThread(
-                self.s3_client.put_object,
-                Bucket=self.bucket,
-                Key=key_name,
-                Body=buf,
-                Metadata={k: str(v) for k, v in six.iteritems(meta or {})},
-                ACL=self.POLICY,
-                **extra)
-        else:
-            b = self._get_boto_bucket()
-            k = b.new_key(key_name)
-            if meta:
-                for metakey, metavalue in six.iteritems(meta):
-                    k.set_metadata(metakey, str(metavalue))
-            h = self.HEADERS.copy()
-            if headers:
-                h.update(headers)
-            return threads.deferToThread(
-                k.set_contents_from_string, buf.getvalue(),
-                headers=h, policy=self.POLICY)
+        extra = self._headers_to_botocore_kwargs(self.HEADERS)
+        if headers:
+            extra.update(self._headers_to_botocore_kwargs(headers))
+        return threads.deferToThread(
+            self.s3_client.put_object,
+            Bucket=self.bucket,
+            Key=key_name,
+            Body=buf,
+            Metadata={k: str(v) for k, v in six.iteritems(meta or {})},
+            ACL=self.POLICY,
+            **extra)
 
     def _headers_to_botocore_kwargs(self, headers):
         """ Convert headers to botocore keyword agruments.
@@ -191,19 +154,6 @@ class S3FilesStore(object):
             'X-Amz-Grant-Read': 'GrantRead',
             'X-Amz-Grant-Read-ACP': 'GrantReadACP',
             'X-Amz-Grant-Write-ACP': 'GrantWriteACP',
-            'X-Amz-Object-Lock-Legal-Hold': 'ObjectLockLegalHoldStatus',
-            'X-Amz-Object-Lock-Mode': 'ObjectLockMode',
-            'X-Amz-Object-Lock-Retain-Until-Date': 'ObjectLockRetainUntilDate',
-            'X-Amz-Request-Payer': 'RequestPayer',
-            'X-Amz-Server-Side-Encryption': 'ServerSideEncryption',
-            'X-Amz-Server-Side-Encryption-Aws-Kms-Key-Id': 'SSEKMSKeyId',
-            'X-Amz-Server-Side-Encryption-Context': 'SSEKMSEncryptionContext',
-            'X-Amz-Server-Side-Encryption-Customer-Algorithm': 'SSECustomerAlgorithm',
-            'X-Amz-Server-Side-Encryption-Customer-Key': 'SSECustomerKey',
-            'X-Amz-Server-Side-Encryption-Customer-Key-Md5': 'SSECustomerKeyMD5',
-            'X-Amz-Storage-Class': 'StorageClass',
-            'X-Amz-Tagging': 'Tagging',
-            'X-Amz-Website-Redirect-Location': 'WebsiteRedirectLocation',
         })
         extra = {}
         for key, value in six.iteritems(headers):
@@ -475,11 +425,4 @@ class FilesPipeline(MediaPipeline):
     def file_path(self, request, response=None, info=None):
         media_guid = hashlib.sha1(to_bytes(request.url)).hexdigest()
         media_ext = os.path.splitext(request.url)[1]
-        # Handles empty and wild extensions by trying to guess the
-        # mime type then extension or default to empty string otherwise
-        if media_ext not in mimetypes.types_map:
-            media_ext = ''
-            media_type = mimetypes.guess_type(request.url)[0]
-            if media_type:
-                media_ext = mimetypes.guess_extension(media_type)
         return 'full/%s%s' % (media_guid, media_ext)
